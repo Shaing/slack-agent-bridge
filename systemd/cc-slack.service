@@ -1,0 +1,23 @@
+# Install:  cp systemd/cc-slack.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now cc-slack
+#           loginctl enable-linger $USER      # keep running without a login session
+# Logs:     journalctl --user -u cc-slack -f
+[Unit]
+Description=cc-slack — Claude Code Slack bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/ah/work/slack-agent
+EnvironmentFile=/home/ah/work/slack-agent/.env
+# PATH matters for the tools Claude runs (git, node, uv, ...), not for finding claude.
+Environment=PATH=/home/ah/.local/bin:/home/ah/.nvm/versions/node/v22.12.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CC_CLI_PATH=/home/ah/.local/bin/claude
+ExecStart=/home/ah/.local/bin/uv run --no-sync cc-slack
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
