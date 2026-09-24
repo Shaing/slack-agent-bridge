@@ -3,21 +3,23 @@
 #   svc adopt cc-slack      stop a copy started by hand, then start the unit
 #   svc logs cc-slack -f
 # Needs `loginctl enable-linger $USER` to keep running without a login session.
+# %h is your home directory. Adjust WorkingDirectory (where you cloned the repo) and the
+# node path in PATH for your machine.
 [Unit]
 Description=cc-slack — Claude Code Slack bridge
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-WorkingDirectory=/home/ah/work/slack-agent
+WorkingDirectory=%h/work/slack-agent
 # No EnvironmentFile: cc-slack reads its .env itself ($CC_ENV_FILE, else
 # ~/.config/cc-slack/.env, else ./.env). systemd would keep the inline "# ..." comments
 # as part of the values (CC_MAX_CONCURRENT="3  # ..."), and process env wins over the
 # file, so int() would fail at startup.
 # PATH matters for the tools Claude runs (git, node, uv, ...), not for finding claude.
-Environment=PATH=/home/ah/.local/bin:/home/ah/.nvm/versions/node/v22.12.0/bin:/usr/local/bin:/usr/bin:/bin
-Environment=CC_CLI_PATH=/home/ah/.local/bin/claude
-ExecStart=/home/ah/.local/bin/uv run --no-sync cc-slack
+Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v22.12.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CC_CLI_PATH=%h/.local/bin/claude
+ExecStart=%h/.local/bin/uv run --no-sync cc-slack
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

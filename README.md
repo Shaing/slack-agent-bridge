@@ -34,7 +34,7 @@ Put options **before** the prompt, in any order:
 ```
 mode:plan  design a caching layer for the API
 model:sonnet  summarize the last 10 commits
-cwd:/home/ah/projects/foo  mode:acceptEdits  model:opus  fix the failing tests
+cwd:~/projects/foo  mode:acceptEdits  model:opus  fix the failing tests
 ```
 
 Anything you leave out uses the defaults from `.env`
@@ -147,7 +147,7 @@ Show Tabs** → enable **Messages Tab** and tick *Allow users to send … messag
 ### 2. Configure & run
 
 ```bash
-cd /home/ah/work/slack-agent
+cd slack-agent                             # your clone of this repo
 mkdir -p ~/.config/cc-slack && chmod 700 ~/.config/cc-slack
 cp .env.example ~/.config/cc-slack/.env && chmod 600 ~/.config/cc-slack/.env
 $EDITOR ~/.config/cc-slack/.env            # tokens, member ID, CC_DEFAULT_CWD, modes
@@ -171,8 +171,8 @@ comment out the "channel mode" lines in the manifest, reinstall the app, and set
 
 ### Run as a service
 
-`systemd/cc-slack.service` is a systemd user unit. Edit `WorkingDirectory`, `PATH`
-and `CC_CLI_PATH` for your machine first. It has no `EnvironmentFile=` on purpose:
+`systemd/cc-slack.service` is a systemd user unit. Paths use `%h` (your home);
+edit `WorkingDirectory` and the node directory in `PATH` for your machine first. It has no `EnvironmentFile=` on purpose:
 cc-slack finds and parses its `.env` itself (see above), and systemd would keep
 inline `# comments` as part of the values.
 
