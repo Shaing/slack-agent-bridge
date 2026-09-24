@@ -1,5 +1,7 @@
 import os
+
 import pytest
+
 from cc_slack.config import ConfigError, resolve_cwd
 
 

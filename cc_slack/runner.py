@@ -12,7 +12,7 @@ import logging
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -32,6 +32,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 from claude_agent_sdk.types import (
+    PermissionMode,
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
@@ -105,7 +106,7 @@ class TurnHandle:
         if self.client is None:
             return False
         try:
-            await self.client.set_permission_mode(mode)
+            await self.client.set_permission_mode(cast(PermissionMode, mode))
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("set_permission_mode failed: %s", exc)
@@ -235,22 +236,14 @@ class Runner:
         async with self.semaphore:
             async with ClaudeSDKClient(options=options) as client:
                 handle.client = client
+                watchdog: asyncio.Task[None] | None = None
+                if self.turn_timeout_s > 0:
+                    watchdog = asyncio.create_task(self._watchdog(sink, handle))
                 try:
                     await client.query(req.prompt)
-                    stream = client.receive_response()
-                    while True:
-                        try:
-                            if self.turn_timeout_s > 0:
-                                msg = await asyncio.wait_for(anext(stream), timeout=self.turn_timeout_s)
-                            else:
-                                msg = await anext(stream)
-                        except StopAsyncIteration:
-                            break
-                        except asyncio.TimeoutError:
-                            await sink.on_notice(f"Turn exceeded {int(self.turn_timeout_s)}s — interrupting.")
-                            await handle.interrupt()
-                            continue
-
+                    # Iterate the stream directly: cancelling `anext()` (e.g. via wait_for)
+                    # would break the generator, so the timeout runs as a side task instead.
+                    async for msg in client.receive_response():
                         if isinstance(msg, SystemMessage):
                             if msg.subtype == "init" and msg.data.get("session_id"):
                                 session_id = msg.data["session_id"]
@@ -308,6 +301,8 @@ class Runner:
                             break
                 finally:
                     handle.client = None
+                    if watchdog is not None:
+                        watchdog.cancel()
 
         if result is None:
             result = TurnResult(
@@ -322,6 +317,12 @@ class Runner:
             result.subtype = "interrupted"
         await sink.on_result(result)
         return result
+
+    async def _watchdog(self, sink: TurnSink, handle: TurnHandle) -> None:
+        """Interrupt the turn once it has run for `turn_timeout_s` seconds."""
+        await asyncio.sleep(self.turn_timeout_s)
+        await sink.on_notice(f"Turn exceeded {int(self.turn_timeout_s)}s — interrupting.")
+        await handle.interrupt()
 
 
 def _join(a: str, b: str) -> str:

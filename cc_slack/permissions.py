@@ -7,8 +7,9 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from claude_agent_sdk.types import PermissionUpdate, ToolPermissionContext
 from slack_sdk.errors import SlackApiError
@@ -197,7 +198,7 @@ class SlackPrompter:
             if self.timeout_s > 0:
                 return await asyncio.wait_for(asyncio.shield(prompt.future), self.timeout_s)
             return await prompt.future
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.registry.discard(prompt.prompt_id)
             await self.mark(prompt, ":hourglass: Expired — no response")
             return on_timeout
@@ -217,7 +218,10 @@ class SlackPrompter:
                 {
                     "type": "context",
                     "elements": [
-                        {"type": "mrkdwn", "text": f":pencil: Reply in this thread with your answer for *{q.get('header', 'this question')}*."}
+                        {
+                            "type": "mrkdwn",
+                            "text": f":pencil: Reply in this thread with your answer for *{q.get('header', 'this question')}*.",
+                        }
                     ],
                 }
             )

@@ -41,6 +41,7 @@ Commands (in a thread or top-level):
 • `!mode [name]` — show / set the permission mode for this thread ({modes})
 • `!model [name|default]` — show / set the model for this thread (e.g. `sonnet`, `opus`, `haiku`, a full model id)
 Mode and model changes apply immediately, even to a turn that is already running.
+While Claude waits for a free-text answer (*Other…*), `!commands` still work; any other message is the answer.
 Default cwd: `{default_cwd}` · default mode: `{default_mode}` · default model: `{default_model}`
 Allowed roots: {roots}"""
 
@@ -164,18 +165,18 @@ class Bridge:
 
         text = slack_text_to_plain(raw_text, self.bot_user_id)
 
-        # Free-text answer to a pending question ("Other…")
+        cmd = parse_command(text)
+        if cmd:
+            await self._handle_command(cmd, channel, thread_ts, ts, session, user)
+            return
+
+        # Free-text answer to a pending question ("Other…"); `!commands` above are never taken as the answer.
         if session and session.pending_prompt_id:
             prompt = self.prompts.get(session.pending_prompt_id)
             session.pending_prompt_id = None
             if prompt and prompt.kind == "question":
                 await self._answer_free_text(prompt, text, user)
                 return
-
-        cmd = parse_command(text)
-        if cmd:
-            await self._handle_command(cmd, channel, thread_ts, ts, session, user)
-            return
         if not text:
             return
 
@@ -315,7 +316,7 @@ class Bridge:
             else:
                 session.record.session_id = None
                 self.sessions.persist()
-                await self._say(channel, thread_ts, ":new: Session forgotten — the next message starts fresh in `%s`." % session.record.cwd)
+                await self._say(channel, thread_ts, f":new: Session forgotten — the next message starts fresh in `{session.record.cwd}`.")
         elif name in ("mode", "model"):
             await self._set_mode_or_model(name, arg, channel, thread_ts, reply_ts, session)
         else:
@@ -363,6 +364,7 @@ class Bridge:
                 text = f"Model: `{record.model or self.settings.model or 'default'}` · set with `!model sonnet|opus|haiku|<id>|default`"
             await self._say(channel, thread_ts, text)
             return
+        value: str | None
         try:
             if name == "mode":
                 value = self._check_mode(arg)
@@ -379,7 +381,7 @@ class Bridge:
         live = ""
         if session.running:
             if name == "mode":
-                ok = await session.handle.set_permission_mode(value)  # type: ignore[arg-type]
+                ok = await session.handle.set_permission_mode(value or record.permission_mode)
             else:
                 ok = await session.handle.set_model(value or self.settings.model)
             live = " — applied to the running turn too" if ok else " — applies from the next turn"
@@ -506,7 +508,7 @@ def register_handlers(app: AsyncApp, bridge: Bridge) -> None:
     async def on_message(event: dict[str, Any]) -> None:
         bridge.spawn(bridge.handle_message(event))
 
-    @app.event({"type": "message", "subtype": IGNORED_SUBTYPES})
+    @app.event({"type": "message", "subtype": IGNORED_SUBTYPES})  # type: ignore[dict-item]
     async def on_message_subtype(event: dict[str, Any]) -> None:
         return  # edits, deletes, joins… are ignored
 

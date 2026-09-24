@@ -75,7 +75,7 @@ class Settings:
     extra_env: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         missing = [k for k in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN") if not _env(k)]
         if missing:
             raise ConfigError(f"missing required env: {', '.join(missing)}")

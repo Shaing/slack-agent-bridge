@@ -287,7 +287,7 @@ def permission_blocks(
     blocks.append(_section(summarize_tool_input_full(tool_name, inp, cwd)))
     buttons = [_button("Allow once", "cc_perm_allow", prompt_id, "primary")]
     if always_rule:
-        buttons.append(_button(f"Always allow", "cc_perm_always", prompt_id))
+        buttons.append(_button("Always allow", "cc_perm_always", prompt_id))
     buttons.append(_button("Deny", "cc_perm_deny", prompt_id, "danger"))
     blocks.append({"type": "actions", "block_id": f"cc_perm_{prompt_id}", "elements": buttons})
     if always_rule:
@@ -324,7 +324,7 @@ def question_blocks(
                 for oi, o in enumerate(options)
             ]
             elem: dict[str, Any] = {"type": "checkboxes", "action_id": f"cc_q_multi_{qi}", "options": opts}
-            initial = [o for o in opts if options[int(o["value"])]["label"] in picked]
+            initial = [o for oi, o in enumerate(opts) if options[oi]["label"] in picked]
             if initial:
                 elem["initial_options"] = initial
             blocks.append({"type": "actions", "block_id": f"cc_q_{prompt_id}_{qi}", "elements": [elem]})

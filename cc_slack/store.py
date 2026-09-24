@@ -32,7 +32,7 @@ class ThreadRecord:
     in_flight: dict[str, Any] | None = None  # {"started_at", "status_ts", "user_ts"} while a turn runs
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ThreadRecord":
+    def from_dict(cls, d: dict[str, Any]) -> ThreadRecord:
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in d.items() if k in known})
 

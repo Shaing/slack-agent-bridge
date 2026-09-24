@@ -61,7 +61,7 @@ only to that thread.
 | `!mode [name]` | Show / set this thread's permission mode |
 | `!model [name\|default]` | Show / set this thread's model: `sonnet`, `opus`, `haiku` or a full id |
 | `!stop` | Interrupt the running turn in this thread |
-| `!status` | In a thread: its settings and state. Top level: your recent threads |
+| `!status` | In a thread: its settings and state. Top level: the 10 most recent threads (all users) |
 | `!new` | Forget this thread's session (keeps cwd/mode/model); next message starts fresh |
 | `!cwd /path` | Set cwd for a thread that hasn't started yet |
 | `!help` | Command list with the current defaults |
@@ -74,6 +74,7 @@ only to that thread.
 | `plan` | Exploration; edits and shell writes get buttons | ✅ |
 | `acceptEdits` | File edits inside the cwd; other commands get buttons | ✅ |
 | `auto` | Whatever a classifier approves; only some prompts reach Slack | opt-in |
+| `dontAsk` | Only pre-approved rules; anything else is denied without asking | opt-in |
 | `bypassPermissions` | Everything | opt-in |
 
 Configure in `.env`:
@@ -85,7 +86,9 @@ CC_DEFAULT_MODE=auto                              # mode for new threads
 
 When a prompt does reach Slack you get **Allow once / Always allow / Deny**.
 Claude's clarifying questions arrive as buttons too (with *Other…* for a free-text
-reply in the thread).
+reply in the thread). After you press *Other…*, the next non-command message in
+that thread is taken as the answer; `!stop`, `!status` and other `!commands`
+still work in the meantime.
 
 ### What is per-thread and what is shared
 
