@@ -1,7 +1,8 @@
-# Install:  cp systemd/cc-slack.service ~/.config/systemd/user/
-#           systemctl --user daemon-reload && systemctl --user enable --now cc-slack
-#           loginctl enable-linger $USER      # keep running without a login session
-# Logs:     journalctl --user -u cc-slack -f
+# Managed by ~/work/ops/svc (registered as cc-slack):
+#   svc install cc-slack    link this file into ~/.config/systemd/user and enable it
+#   svc adopt cc-slack      stop a copy started by hand, then start the unit
+#   svc logs cc-slack -f
+# Needs `loginctl enable-linger $USER` to keep running without a login session.
 [Unit]
 Description=cc-slack — Claude Code Slack bridge
 After=network-online.target
@@ -9,7 +10,9 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/ah/work/slack-agent
-EnvironmentFile=/home/ah/work/slack-agent/.env
+# No EnvironmentFile: cc-slack reads .env from its cwd itself. systemd would keep the
+# inline "# ..." comments as part of the values (CC_MAX_CONCURRENT="3  # ..."), and
+# process env wins over the file, so int() would fail at startup.
 # PATH matters for the tools Claude runs (git, node, uv, ...), not for finding claude.
 Environment=PATH=/home/ah/.local/bin:/home/ah/.nvm/versions/node/v22.12.0/bin:/usr/local/bin:/usr/bin:/bin
 Environment=CC_CLI_PATH=/home/ah/.local/bin/claude
