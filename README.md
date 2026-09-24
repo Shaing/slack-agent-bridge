@@ -153,13 +153,29 @@ comment out the "channel mode" lines in the manifest, reinstall the app, and set
 
 ### Run as a service
 
+`systemd/cc-slack.service` is a systemd user unit. Edit `WorkingDirectory`, `PATH`
+and `CC_CLI_PATH` for your machine first. It has no `EnvironmentFile=` on purpose:
+cc-slack reads `.env` from its working directory, and systemd would keep inline
+`# comments` as part of the values.
+
+On a host with the `~/work/ops/svc` tool (where it is registered as `cc-slack`):
+
 ```bash
-cp systemd/cc-slack.service ~/.config/systemd/user/
-systemctl --user daemon-reload
+svc install cc-slack                  # link the unit into ~/.config/systemd/user and enable it
+svc start cc-slack                    # or `svc adopt cc-slack` to replace a copy started by hand
+svc logs cc-slack -f
+```
+
+Without it:
+
+```bash
+systemctl --user link "$PWD/systemd/cc-slack.service"   # symlink, so edits in the repo apply
 systemctl --user enable --now cc-slack
-loginctl enable-linger $USER          # keep it running after you log out
 journalctl --user -u cc-slack -f
 ```
+
+Either way, run `loginctl enable-linger $USER` once so it keeps running after you
+log out, and don't also start it with `uv run cc-slack` (two bots would answer every message).
 
 ## Tips
 
