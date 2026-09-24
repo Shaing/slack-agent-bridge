@@ -25,6 +25,7 @@ class ThreadRecord:
     owner: str
     session_id: str | None = None
     permission_mode: str = "default"
+    model: str | None = None  # None = CC_MODEL / CLI default
     created_at: float = 0.0
     last_used: float = 0.0
     turns: int = 0
@@ -89,10 +90,22 @@ class SessionRegistry:
             self.sessions[thread_key] = session
         return session
 
-    def create(self, channel: str, thread_ts: str, cwd: str, owner: str) -> ThreadSession:
+    def create(
+        self,
+        channel: str,
+        thread_ts: str,
+        cwd: str,
+        owner: str,
+        *,
+        permission_mode: str = "default",
+        model: str | None = None,
+    ) -> ThreadSession:
         key = self.key(channel, thread_ts)
         now = time.time()
-        record = ThreadRecord(key, channel, thread_ts, cwd, owner, created_at=now, last_used=now)
+        record = ThreadRecord(
+            key, channel, thread_ts, cwd, owner,
+            permission_mode=permission_mode, model=model, created_at=now, last_used=now,
+        )
         self.records[key] = record
         session = ThreadSession(record)
         self.sessions[key] = session

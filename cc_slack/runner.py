@@ -52,6 +52,7 @@ class TurnRequest:
     cwd: str
     session_id: str | None = None
     permission_mode: str = "default"
+    model: str | None = None
 
 
 @dataclass
@@ -99,6 +100,28 @@ class TurnHandle:
             log.warning("interrupt failed: %s", exc)
             return False
 
+    async def set_permission_mode(self, mode: str) -> bool:
+        """Switch the running turn's permission mode. False if nothing is running."""
+        if self.client is None:
+            return False
+        try:
+            await self.client.set_permission_mode(mode)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("set_permission_mode failed: %s", exc)
+            return False
+
+    async def set_model(self, model: str | None) -> bool:
+        """Switch the running turn's model (None = default). False if nothing is running."""
+        if self.client is None:
+            return False
+        try:
+            await self.client.set_model(model)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("set_model failed: %s", exc)
+            return False
+
 
 class TurnSink(Protocol):
     async def on_session_started(self, session_id: str) -> None: ...
@@ -140,7 +163,7 @@ class Runner:
             permission_mode=req.permission_mode,  # type: ignore[arg-type]
             can_use_tool=bridge,
             cli_path=self.cli_path,
-            model=self.model,
+            model=req.model or self.model,
             # None would pass an *empty* system prompt; we want real Claude Code.
             system_prompt={"type": "preset", "preset": "claude_code"},
             # include "local" so "Always allow" rules written to
@@ -168,7 +191,7 @@ class Runner:
                 await sink.on_notice(
                     f"Session `{req.session_id[:8]}…` no longer exists on disk — starting a fresh session."
                 )
-                fresh = TurnRequest(req.thread_key, req.prompt, req.cwd, None, req.permission_mode)
+                fresh = TurnRequest(req.thread_key, req.prompt, req.cwd, None, req.permission_mode, req.model)
                 try:
                     return await self._run_once(fresh, sink, prompter, handle)
                 except ClaudeSDKError as exc2:

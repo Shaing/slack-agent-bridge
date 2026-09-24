@@ -170,3 +170,45 @@ async def test_commands(bridge):
     await b.handle_message({**im, "ts": "2.2", "thread_ts": "2.0", "text": "!status"})
     assert "mode: `plan`" in slack.of("post")[-1]["text"]
     assert runner.requests == []
+
+
+async def test_mode_and_model_commands(bridge):
+    b, slack, runner = bridge
+    await b.startup()
+    im = {"type": "message", "user": "UOWNER", "channel": "D1", "channel_type": "im"}
+    last = lambda: slack.of("post")[-1]["text"]
+
+    # thread-start prefixes
+    await b.handle_message({**im, "ts": "1.0", "text": "mode:plan model:sonnet"})
+    rec = b.sessions.get("D1:1.0").record
+    assert (rec.permission_mode, rec.model) == ("plan", "sonnet") and "Thread ready" in last()
+
+    # disallowed mode rejected, nothing created
+    await b.handle_message({**im, "ts": "2.0", "text": "mode:bypassPermissions do it"})
+    assert last().startswith(":x:") and b.sessions.get("D1:2.0") is None
+
+    # in-thread changes
+    await b.handle_message({**im, "ts": "1.1", "thread_ts": "1.0", "text": "!mode acceptedits"})
+    assert rec.permission_mode == "acceptEdits"
+    await b.handle_message({**im, "ts": "1.2", "thread_ts": "1.0", "text": "!mode auto"})
+    assert rec.permission_mode == "acceptEdits" and last().startswith(":x:")
+    await b.handle_message({**im, "ts": "1.3", "thread_ts": "1.0", "text": "!model opus"})
+    assert rec.model == "opus"
+    await b.handle_message({**im, "ts": "1.4", "thread_ts": "1.0", "text": "!model"})
+    assert "`opus`" in last()
+    await b.handle_message({**im, "ts": "1.5", "thread_ts": "1.0", "text": "!model default"})
+    assert rec.model is None
+    await b.handle_message({**im, "ts": "1.6", "thread_ts": "1.0", "text": "!model rm -rf"})
+    assert rec.model is None and last().startswith(":x:")  # spaces are not valid in a model name
+    await b.handle_message({**im, "ts": "1.7", "thread_ts": "1.0", "text": "!model $(whoami)"})
+    assert rec.model is None and last().startswith(":x:")
+
+    # top-level !model explains how to use it
+    await b.handle_message({**im, "ts": "3.0", "text": "!model opus"})
+    assert "inside a thread" in last()
+
+    # the model reaches the runner
+    await b.handle_message({**im, "ts": "1.8", "thread_ts": "1.0", "text": "!model haiku"})
+    b.prompter.timeout_s = 0.2  # nobody clicks; let the prompt expire fast
+    await b.handle_message({**im, "ts": "1.9", "thread_ts": "1.0", "text": "go"})
+    assert runner.requests[-1].model == "haiku" and runner.requests[-1].permission_mode == "acceptEdits"

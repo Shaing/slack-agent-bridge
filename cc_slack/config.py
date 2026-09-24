@@ -41,6 +41,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+# Modes that still route every risky action to a human in Slack.
+SAFE_MODES = ("default", "plan", "acceptEdits")
+# `auto` lets a classifier approve actions; `bypassPermissions` approves everything.
+ALL_MODES = (*SAFE_MODES, "auto", "dontAsk", "bypassPermissions")
+
+
 class ConfigError(Exception):
     pass
 
@@ -63,6 +69,8 @@ class Settings:
     stream_deltas: bool = False
     turn_timeout_s: float = 0
     model: str | None = None
+    default_mode: str = "default"
+    allowed_modes: tuple[str, ...] = SAFE_MODES
     log_level: str = "INFO"
     extra_env: dict[str, str] = field(default_factory=dict)
 
@@ -89,6 +97,16 @@ class Settings:
             if r.strip()
         )
 
+        allowed_modes = tuple(
+            m.strip() for m in (_env("CC_ALLOWED_MODES") or ",".join(SAFE_MODES)).split(",") if m.strip()
+        )
+        bad = [m for m in allowed_modes if m not in ALL_MODES]
+        if bad:
+            raise ConfigError(f"CC_ALLOWED_MODES has unknown modes {bad}; valid: {', '.join(ALL_MODES)}")
+        default_mode = _env("CC_DEFAULT_MODE") or "default"
+        if default_mode not in allowed_modes:
+            raise ConfigError(f"CC_DEFAULT_MODE={default_mode!r} is not in CC_ALLOWED_MODES")
+
         cli_path = _env("CC_CLI_PATH")
         if cli_path is None:
             candidate = Path.home() / ".local/bin/claude"
@@ -113,6 +131,8 @@ class Settings:
             stream_deltas=_env_bool("CC_STREAM_DELTAS"),
             turn_timeout_s=float(_env("CC_TURN_TIMEOUT_S") or 0),
             model=_env("CC_MODEL"),
+            default_mode=default_mode,
+            allowed_modes=allowed_modes,
             log_level=_env("CC_LOG_LEVEL") or "INFO",
         )
 

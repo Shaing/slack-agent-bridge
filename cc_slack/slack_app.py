@@ -22,13 +22,15 @@ from .stream import ChannelGate, TurnOutput
 
 log = logging.getLogger(__name__)
 
-CWD_PREFIX_RE = re.compile(r"^\s*cwd:\s*(\S+)\s*\n?", re.I)
-VALID_MODES = ("default", "plan", "acceptEdits")
+# Leading `cwd:… mode:… model:…` options on the message that starts a thread, any order.
+PREFIX_RE = re.compile(r"^\s*(cwd|mode|model):[ \t]*(\S+)[ \t]*\n?", re.I)
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]*$")
 IGNORED_SUBTYPES = re.compile(r".+")
 
 HELP = """*cc-slack — Claude Code via Slack*
 Send me a DM to start a new Claude Code session; reply *in the thread* to continue it.
-Start a message with `cwd:/abs/path` to pick the working directory for a new session.
+Start a new thread with options before the prompt, in any order:
+`cwd:/abs/path` · `mode:plan` · `model:sonnet`   e.g. `mode:plan model:opus refactor the parser`
 
 Commands (in a thread or top-level):
 • `!help` — this text
@@ -36,16 +38,26 @@ Commands (in a thread or top-level):
 • `!stop` — interrupt the running turn in this thread
 • `!cwd /path` — set the working directory for a *new* thread
 • `!new` — forget this thread's session (keeps cwd); next message starts fresh
-• `!mode default|plan|acceptEdits` — permission mode for later turns in this thread
-Default cwd: `{default_cwd}`
+• `!mode [name]` — show / set the permission mode for this thread ({modes})
+• `!model [name|default]` — show / set the model for this thread (e.g. `sonnet`, `opus`, `haiku`, a full model id)
+Mode and model changes apply immediately, even to a turn that is already running.
+Default cwd: `{default_cwd}` · default mode: `{default_mode}` · default model: `{default_model}`
 Allowed roots: {roots}"""
 
 
-def parse_cwd_prefix(text: str) -> tuple[str | None, str]:
-    m = CWD_PREFIX_RE.match(text)
-    if not m:
-        return None, text
-    return m.group(1), text[m.end():].strip()
+def parse_prefixes(text: str) -> tuple[dict[str, str], str]:
+    """Split leading `cwd:X mode:Y model:Z` options off a message."""
+    opts: dict[str, str] = {}
+    while m := PREFIX_RE.match(text):
+        opts[m.group(1).lower()] = m.group(2)
+        text = text[m.end():]
+    return opts, text.strip()
+
+
+def normalize_mode(value: str) -> str:
+    """Case-insensitive match against the SDK's mode names (acceptedits -> acceptEdits)."""
+    names = {m.lower(): m for m in ("default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions")}
+    return names.get(value.strip().lower(), value.strip())
 
 
 def parse_command(text: str) -> tuple[str, str] | None:
@@ -168,17 +180,23 @@ class Bridge:
             return
 
         if session is None:
-            cwd_arg, text = parse_cwd_prefix(text)
+            opts, text = parse_prefixes(text)
             try:
-                cwd = resolve_cwd(cwd_arg, self.settings.allowed_roots) if cwd_arg else self.settings.default_cwd
+                cwd = resolve_cwd(opts["cwd"], self.settings.allowed_roots) if "cwd" in opts else self.settings.default_cwd
+                mode = self._check_mode(opts["mode"]) if "mode" in opts else self.settings.default_mode
+                model = self._check_model(opts["model"]) if "model" in opts else None
             except ConfigError as exc:
                 await self._say(channel, thread_ts, f":x: {exc}")
                 return
+            session = self.sessions.create(channel, thread_ts, cwd, user, permission_mode=mode, model=model)
             if not text:
-                self.sessions.create(channel, thread_ts, cwd, user)
-                await self._say(channel, thread_ts, f"cwd set to `{cwd}` — reply in this thread with your first prompt.")
+                await self._say(
+                    channel,
+                    thread_ts,
+                    f"Thread ready — cwd `{cwd}` · mode `{mode}` · model `{model or 'default'}`. "
+                    "Reply in this thread with your first prompt.",
+                )
                 return
-            session = self.sessions.create(channel, thread_ts, cwd, user)
 
         await self.run_turn(session, text, user_ts=ts)
 
@@ -208,10 +226,15 @@ class Bridge:
             self.sessions.persist()
 
             session.handle = TurnHandle()
-            req = TurnRequest(record.thread_key, prompt, record.cwd, record.session_id, record.permission_mode)
+            if record.permission_mode not in self.settings.allowed_modes:
+                record.permission_mode = self.settings.default_mode
+            req = TurnRequest(
+                record.thread_key, prompt, record.cwd, record.session_id, record.permission_mode, record.model
+            )
             log.info(
-                "turn start %s cwd=%s resume=%s mode=%s prompt=%r",
-                record.thread_key, record.cwd, (record.session_id or "-")[:8], record.permission_mode, prompt[:80],
+                "turn start %s cwd=%s resume=%s mode=%s model=%s prompt=%r",
+                record.thread_key, record.cwd, (record.session_id or "-")[:8], record.permission_mode,
+                record.model or "-", prompt[:80],
             )
             try:
                 result = await self.runner.run_turn(req, out, self.prompter, session.handle)
@@ -246,7 +269,17 @@ class Bridge:
         reply_ts = thread_ts if (session or thread_ts != ts) else None  # top-level replies stay top-level
         if name == "help":
             roots = ", ".join(f"`{r}`" for r in self.settings.allowed_roots)
-            await self._say(channel, reply_ts, HELP.format(default_cwd=self.settings.default_cwd, roots=roots))
+            await self._say(
+                channel,
+                reply_ts,
+                HELP.format(
+                    default_cwd=self.settings.default_cwd,
+                    roots=roots,
+                    modes=", ".join(f"`{m}`" for m in self.settings.allowed_modes),
+                    default_mode=self.settings.default_mode,
+                    default_model=self.settings.model or "CLI default",
+                ),
+            )
         elif name == "status":
             await self._say(channel, reply_ts, self._status_text(session))
         elif name == "stop":
@@ -266,7 +299,7 @@ class Bridge:
                 await self._say(channel, reply_ts, f":x: {exc}")
                 return
             if session is None:
-                self.sessions.create(channel, thread_ts, cwd, user)
+                self.sessions.create(channel, thread_ts, cwd, user, permission_mode=self.settings.default_mode)
                 await self._say(channel, thread_ts, f"cwd set to `{cwd}` — reply in this thread with your first prompt.")
             elif session.record.session_id is None and not session.running:
                 session.record.cwd = cwd
@@ -283,17 +316,77 @@ class Bridge:
                 session.record.session_id = None
                 self.sessions.persist()
                 await self._say(channel, thread_ts, ":new: Session forgotten — the next message starts fresh in `%s`." % session.record.cwd)
-        elif name == "mode":
-            if arg not in VALID_MODES:
-                await self._say(channel, reply_ts, f"Usage: `!mode {'|'.join(VALID_MODES)}`")
-            elif session is None:
-                await self._say(channel, reply_ts, "Use `!mode` inside a thread.")
-            else:
-                session.record.permission_mode = arg
-                self.sessions.persist()
-                await self._say(channel, thread_ts, f"Permission mode for this thread: `{arg}` (applies from the next turn).")
+        elif name in ("mode", "model"):
+            await self._set_mode_or_model(name, arg, channel, thread_ts, reply_ts, session)
         else:
             await self._say(channel, reply_ts, f"Unknown command `!{name}` — try `!help`.")
+
+    def _check_mode(self, value: str) -> str:
+        mode = normalize_mode(value)
+        if mode not in self.settings.allowed_modes:
+            allowed = ", ".join(f"`{m}`" for m in self.settings.allowed_modes)
+            raise ConfigError(f"mode `{value}` is not allowed — choose one of {allowed} (see CC_ALLOWED_MODES)")
+        return mode
+
+    @staticmethod
+    def _check_model(value: str) -> str | None:
+        value = value.strip()
+        if value.lower() in ("default", "reset", "none"):
+            return None
+        if not MODEL_RE.match(value) or len(value) > 100:
+            raise ConfigError(f"`{value}` doesn't look like a model name (try `sonnet`, `opus`, `haiku` or a full id)")
+        return value
+
+    async def _set_mode_or_model(
+        self,
+        name: str,
+        arg: str,
+        channel: str,
+        thread_ts: str,
+        reply_ts: str | None,
+        session: ThreadSession | None,
+    ) -> None:
+        if session is None:
+            await self._say(
+                channel,
+                reply_ts,
+                f"`!{name}` works inside a thread. To start a new thread with it, "
+                f"send e.g. `{name}:{'plan' if name == 'mode' else 'sonnet'} your prompt`.",
+            )
+            return
+        record = session.record
+        if not arg:
+            if name == "mode":
+                allowed = ", ".join(f"`{m}`" for m in self.settings.allowed_modes)
+                text = f"Permission mode: `{record.permission_mode}` · allowed: {allowed}"
+            else:
+                text = f"Model: `{record.model or self.settings.model or 'default'}` · set with `!model sonnet|opus|haiku|<id>|default`"
+            await self._say(channel, thread_ts, text)
+            return
+        try:
+            if name == "mode":
+                value = self._check_mode(arg)
+                record.permission_mode = value
+            else:
+                value = self._check_model(arg)
+                record.model = value
+        except ConfigError as exc:
+            await self._say(channel, thread_ts, f":x: {exc}")
+            return
+        self.sessions.persist()
+        label = "Permission mode" if name == "mode" else "Model"
+        shown = value or f"{self.settings.model or 'default'} (default)"
+        live = ""
+        if session.running:
+            if name == "mode":
+                ok = await session.handle.set_permission_mode(value)  # type: ignore[arg-type]
+            else:
+                ok = await session.handle.set_model(value or self.settings.model)
+            live = " — applied to the running turn too" if ok else " — applies from the next turn"
+        warn = ""
+        if name == "mode" and value in ("auto", "bypassPermissions", "dontAsk"):
+            warn = "\n:warning: In this mode some or all actions run *without* asking you in Slack."
+        await self._say(channel, thread_ts, f"{label} for this thread: `{shown}`{live}.{warn}")
 
     def _status_text(self, session: ThreadSession | None) -> str:
         running = self.sessions.running()
@@ -313,7 +406,8 @@ class Bridge:
         state = "waiting for your input" if pending else ("running" if session.running else "idle")
         return (
             f"*Thread status*\n• cwd: `{r.cwd}`\n• session: `{r.session_id or '(none yet)'}`\n"
-            f"• mode: `{r.permission_mode}`\n• state: {state}\n• turns: {r.turns}"
+            f"• mode: `{r.permission_mode}`\n• model: `{r.model or self.settings.model or 'default'}`\n"
+            f"• state: {state}\n• turns: {r.turns}"
             + (f"\n• queued: {session.queued}" if session.queued else "")
             + f"\n• {slots}"
         )

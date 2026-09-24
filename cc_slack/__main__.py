@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -18,6 +19,8 @@ from .slack_app import Bridge, register_handlers
 from .store import SessionRegistry, ThreadStore
 
 log = logging.getLogger("cc_slack")
+
+SECRET_ENV = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")
 
 
 async def _amain(settings: Settings) -> None:
@@ -62,6 +65,10 @@ def main() -> None:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         sys.exit(2)
+    # The SDK hands os.environ to the claude CLI, so every command Claude runs
+    # would see the Slack tokens (e.g. via `env`). Keep them only in Settings.
+    for key in SECRET_ENV:
+        os.environ.pop(key, None)
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
