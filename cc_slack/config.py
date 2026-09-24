@@ -8,6 +8,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def find_env_file() -> Path:
+    """Where the bot's .env lives: $CC_ENV_FILE, else ~/.config/cc-slack/.env, else ./.env.
+
+    The XDG location is preferred so the tokens sit outside CC_ALLOWED_ROOTS — a
+    Claude session in an allowed root can read any file this user can. Only the
+    explicit override must exist; the defaults fall through when absent.
+    """
+    override = os.environ.get("CC_ENV_FILE")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_file():
+            raise ConfigError(f"CC_ENV_FILE does not exist: {path}")
+        return path
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "cc-slack" / ".env"
+    return xdg if xdg.is_file() else Path(".env")
+
+
 def load_dotenv(path: Path) -> None:
     """Minimal .env loader: KEY=VALUE lines, '#' comments, no interpolation.
 

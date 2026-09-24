@@ -31,3 +31,21 @@ def test_load_dotenv_strips_inline_comments(tmp_path, monkeypatch):
     load_dotenv(f)
     assert os.environ["A"] == "3" and os.environ["B"] == "x # not a comment" and os.environ["D"] == "hello"
     assert "C" not in os.environ
+
+
+def test_find_env_file_override_then_xdg_then_cwd(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from cc_slack.config import find_env_file
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("CC_ENV_FILE", raising=False)
+    assert find_env_file() == Path(".env")  # nothing else exists yet
+    xdg = tmp_path / "xdg" / "cc-slack" / ".env"
+    xdg.parent.mkdir(parents=True); xdg.write_text("")
+    assert find_env_file() == xdg  # preferred over ./.env
+    monkeypatch.setenv("CC_ENV_FILE", str(tmp_path / "custom.env"))
+    with pytest.raises(ConfigError):
+        find_env_file()  # explicit override must exist
+    (tmp_path / "custom.env").write_text("")
+    assert find_env_file() == tmp_path / "custom.env"

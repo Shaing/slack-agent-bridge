@@ -108,6 +108,20 @@ them to a Claude config file.
   their button clicks are refused.
 * The Slack tokens are removed from the environment the `claude` CLI inherits,
   so commands Claude runs (e.g. `env`) can't see them.
+* The `.env` file is the other place the tokens live, and Claude can read any
+  file your user can. Keep it **outside** `CC_ALLOWED_ROOTS` — the default
+  location `~/.config/cc-slack/.env` is chosen for that — and deny it to Claude
+  in `~/.claude/settings.json` (the bot passes `setting_sources=["user", …]`,
+  so this applies to every session it starts):
+
+  ```json
+  { "permissions": { "deny": ["Read(~/.config/cc-slack/**)"] } }
+  ```
+
+  That rule covers the `Read`/`Grep`/`Glob` tools. A shell command in `auto`
+  or `bypassPermissions` mode could still `cat` the file, so use
+  `default`/`plan` when Claude will process untrusted content (other people's
+  repos, web pages).
 * `cwd:` / `!cwd` only accept directories under `CC_ALLOWED_ROOTS`.
 * In `auto` or `bypassPermissions`, commands run on this machine without your
   click. Prefer `default`/`plan` in shared channels, and review
@@ -134,14 +148,18 @@ Show Tabs** → enable **Messages Tab** and tick *Allow users to send … messag
 
 ```bash
 cd /home/ah/work/slack-agent
-cp .env.example .env && chmod 600 .env     # tokens, member ID, CC_DEFAULT_CWD, modes
+mkdir -p ~/.config/cc-slack && chmod 700 ~/.config/cc-slack
+cp .env.example ~/.config/cc-slack/.env && chmod 600 ~/.config/cc-slack/.env
+$EDITOR ~/.config/cc-slack/.env            # tokens, member ID, CC_DEFAULT_CWD, modes
 uv sync
 uv run cc-slack
 ```
 
 Send the bot `hello`. You should see 👀 on your message, a status message,
 Claude's reply, then ✅. The bot reads `.env` only at startup — restart it after
-editing. Run only **one** instance at a time.
+editing. It looks for `$CC_ENV_FILE`, then `~/.config/cc-slack/.env`, then
+`./.env` (fine for a quick test, but see *Security* above). Run only **one**
+instance at a time.
 
 ### Channels vs DM-only
 
@@ -155,8 +173,8 @@ comment out the "channel mode" lines in the manifest, reinstall the app, and set
 
 `systemd/cc-slack.service` is a systemd user unit. Edit `WorkingDirectory`, `PATH`
 and `CC_CLI_PATH` for your machine first. It has no `EnvironmentFile=` on purpose:
-cc-slack reads `.env` from its working directory, and systemd would keep inline
-`# comments` as part of the values.
+cc-slack finds and parses its `.env` itself (see above), and systemd would keep
+inline `# comments` as part of the values.
 
 On a host with the `~/work/ops/svc` tool (where it is registered as `cc-slack`):
 

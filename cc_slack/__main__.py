@@ -7,13 +7,12 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.app.async_app import AsyncApp
 from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 
-from .config import ConfigError, Settings, load_dotenv
+from .config import ConfigError, Settings, find_env_file, load_dotenv
 from .runner import Runner
 from .slack_app import Bridge, register_handlers
 from .store import SessionRegistry, ThreadStore
@@ -59,8 +58,9 @@ async def _amain(settings: Settings) -> None:
 
 
 def main() -> None:
-    load_dotenv(Path(".env"))
     try:
+        env_file = find_env_file()
+        load_dotenv(env_file)
         settings = Settings.from_env()
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
@@ -75,6 +75,7 @@ def main() -> None:
     )
     logging.getLogger("slack_bolt").setLevel(logging.WARNING)
     logging.getLogger("slack_sdk").setLevel(logging.WARNING)
+    log.info("settings from %s", env_file.resolve() if env_file.is_file() else "environment only (no .env found)")
     asyncio.run(_amain(settings))
 
 

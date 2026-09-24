@@ -10,9 +10,10 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/ah/work/slack-agent
-# No EnvironmentFile: cc-slack reads .env from its cwd itself. systemd would keep the
-# inline "# ..." comments as part of the values (CC_MAX_CONCURRENT="3  # ..."), and
-# process env wins over the file, so int() would fail at startup.
+# No EnvironmentFile: cc-slack reads its .env itself ($CC_ENV_FILE, else
+# ~/.config/cc-slack/.env, else ./.env). systemd would keep the inline "# ..." comments
+# as part of the values (CC_MAX_CONCURRENT="3  # ..."), and process env wins over the
+# file, so int() would fail at startup.
 # PATH matters for the tools Claude runs (git, node, uv, ...), not for finding claude.
 Environment=PATH=/home/ah/.local/bin:/home/ah/.nvm/versions/node/v22.12.0/bin:/usr/local/bin:/usr/bin:/bin
 Environment=CC_CLI_PATH=/home/ah/.local/bin/claude
