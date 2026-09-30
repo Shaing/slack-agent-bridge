@@ -50,6 +50,9 @@ class PrintSink:
     async def on_working(self) -> None:
         print("[working]")
 
+    async def on_background(self, tasks: list[str]) -> None:
+        print(f"\n[background] waiting for {len(tasks)}: {', '.join(tasks)}")
+
     async def on_notice(self, text: str) -> None:
         print(f"\n[notice] {text}")
 
@@ -105,6 +108,7 @@ async def main() -> None:
     ap.add_argument("--cwd", default=os.getcwd())
     ap.add_argument("--resume")
     ap.add_argument("--mode", default="default")
+    ap.add_argument("--model")
     ap.add_argument("--auto", choices=["y", "a", "n"])
     ap.add_argument("--cli", default=os.environ.get("CC_CLI_PATH"))
     ap.add_argument("--stream", action="store_true")
@@ -114,7 +118,7 @@ async def main() -> None:
 
     cwd = os.path.realpath(args.cwd)
     runner = Runner(cli_path=args.cli, stream_deltas=args.stream)
-    req = TurnRequest("smoke", args.prompt, cwd, args.resume, args.mode)
+    req = TurnRequest("smoke", args.prompt, cwd, args.resume, args.mode, args.model)
     await runner.run_turn(req, PrintSink(cwd), StdinPrompter(args.auto))
 
 

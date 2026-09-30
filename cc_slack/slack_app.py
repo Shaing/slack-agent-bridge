@@ -35,7 +35,7 @@ Start a new thread with options before the prompt, in any order:
 Commands (in a thread or top-level):
 • `!help` — this text
 • `!status` — session info / running turns
-• `!stop` — interrupt the running turn in this thread
+• `!stop` — interrupt the running turn in this thread (or stop the background tasks it is waiting for)
 • `!cwd /path` — set the working directory for a *new* thread
 • `!new` — forget this thread's session (keeps cwd); next message starts fresh
 • `!mode [name]` — show / set the permission mode for this thread ({modes})
@@ -405,7 +405,12 @@ class Bridge:
             return "\n".join(lines)
         r = session.record
         pending = self.prompts.for_thread(r.thread_key)
-        state = "waiting for your input" if pending else ("running" if session.running else "idle")
+        if pending:
+            state = "waiting for your input"
+        elif session.handle.idle:
+            state = "answered, waiting for background tasks"
+        else:
+            state = "running" if session.running else "idle"
         return (
             f"*Thread status*\n• cwd: `{r.cwd}`\n• session: `{r.session_id or '(none yet)'}`\n"
             f"• mode: `{r.permission_mode}`\n• model: `{r.model or self.settings.model or 'default'}`\n"

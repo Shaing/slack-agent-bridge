@@ -32,6 +32,7 @@ async def _amain(settings: Settings) -> None:
         max_concurrent=settings.max_concurrent,
         stream_deltas=settings.stream_deltas,
         turn_timeout_s=settings.turn_timeout_s,
+        background_wait_s=settings.background_wait_s,
     )
     sessions = SessionRegistry(ThreadStore(settings.state_file))
     bridge = Bridge(settings, app.client, runner, sessions)

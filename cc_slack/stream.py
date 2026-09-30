@@ -233,6 +233,15 @@ class TurnOutput:
     async def on_working(self) -> None:
         self._set_header(":hourglass_flowing_sand: Working…")
 
+    async def on_background(self, tasks: list[str]) -> None:
+        n = len(tasks)
+        names = ", ".join(f"_{t[:80]}_" for t in tasks[:5]) + (f" and {n - 5} more" if n > 5 else "")
+        self._set_header(
+            f":hourglass_flowing_sand: Waiting for {n} background task{'s' if n != 1 else ''}: {names}"
+            " · `!stop` ends them"
+        )
+        await self.status.flush()
+
     async def on_notice(self, text: str) -> None:
         await self.gate.wait(self.channel)
         try:

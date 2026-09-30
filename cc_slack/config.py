@@ -85,6 +85,7 @@ class Settings:
     show_tools: bool = True
     stream_deltas: bool = False
     turn_timeout_s: float = 0
+    background_wait_s: float = 3600
     model: str | None = None
     default_mode: str = "default"
     allowed_modes: tuple[str, ...] = SAFE_MODES
@@ -147,6 +148,7 @@ class Settings:
             show_tools=_env_bool("CC_SHOW_TOOLS", True),
             stream_deltas=_env_bool("CC_STREAM_DELTAS"),
             turn_timeout_s=float(_env("CC_TURN_TIMEOUT_S") or 0),
+            background_wait_s=float(_env("CC_BACKGROUND_WAIT_S") or 3600),
             model=_env("CC_MODEL"),
             default_mode=default_mode,
             allowed_modes=allowed_modes,

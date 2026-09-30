@@ -26,6 +26,11 @@ you:  @aLLEN what's in this repo?          ← top-level message: starts a NEW s
   `@mention` again. Sessions survive bot restarts.
 * Each thread has its **own** mode, model and working directory. Run several
   threads side by side (up to `CC_MAX_CONCURRENT`, default 3).
+* Background tasks (an Agent or Bash call with `run_in_background`) keep the
+  turn open after the answer: the status line shows what is still running, and
+  each result Claude reports when a task finishes arrives as a new message. The
+  thread takes its next message after the tasks end, `!stop`, or
+  `CC_BACKGROUND_WAIT_S` (default 3600 s, then they are stopped).
 
 ### Pick mode / model / directory when you start a thread
 
@@ -60,7 +65,7 @@ only to that thread.
 | reply in a thread | Continues that thread's session |
 | `!mode [name]` | Show / set this thread's permission mode |
 | `!model [name\|default]` | Show / set this thread's model: `sonnet`, `opus`, `haiku` or a full id |
-| `!stop` | Interrupt the running turn in this thread |
+| `!stop` | Interrupt the running turn in this thread, or stop the background tasks it is waiting for |
 | `!status` | In a thread: its settings and state. Top level: the 10 most recent threads (all users) |
 | `!new` | Forget this thread's session (keeps cwd/mode/model); next message starts fresh |
 | `!cwd /path` | Set cwd for a thread that hasn't started yet |
