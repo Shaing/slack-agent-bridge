@@ -49,3 +49,16 @@ def test_find_env_file_override_then_xdg_then_cwd(tmp_path, monkeypatch):
         find_env_file()  # explicit override must exist
     (tmp_path / "custom.env").write_text("")
     assert find_env_file() == tmp_path / "custom.env"
+
+
+def test_router_setting(tmp_path, monkeypatch):
+    from cc_slack.config import Settings
+    for k, v in {"SLACK_BOT_TOKEN": "x", "SLACK_APP_TOKEN": "y", "CC_ALLOWED_USERS": "U1", "CC_DEFAULT_CWD": str(tmp_path)}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("CC_ROUTER", raising=False)
+    assert Settings.from_env().router == "off"
+    monkeypatch.setenv("CC_ROUTER", "Shadow")
+    assert Settings.from_env().router == "shadow"
+    monkeypatch.setenv("CC_ROUTER", "maybe")
+    with pytest.raises(ConfigError):
+        Settings.from_env()

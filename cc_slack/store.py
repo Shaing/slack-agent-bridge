@@ -30,6 +30,12 @@ class ThreadRecord:
     last_used: float = 0.0
     turns: int = 0
     in_flight: dict[str, Any] | None = None  # {"started_at", "status_ts", "user_ts"} while a turn runs
+    lane: str | None = None  # "local" while the local model answers this thread; None = Claude
+    local_history: list[dict[str, str]] = field(default_factory=list)  # the local lane's messages
+    effort: str | None = None  # None = the CLI default for the model
+    tier: str | None = None  # model router's call: simple / standard / heavy
+    routed: bool = False  # model/effort were set by the router; a user `!model` / `!effort` clears it
+    last_answer: str | None = None  # start of Claude's last reply, context for the follow-up check
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ThreadRecord:

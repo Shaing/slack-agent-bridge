@@ -73,6 +73,7 @@ class TurnRequest:
     session_id: str | None = None
     permission_mode: str = "default"
     model: str | None = None
+    effort: str | None = None  # None = the CLI's default for the model
 
 
 @dataclass
@@ -192,6 +193,7 @@ class Runner:
             can_use_tool=bridge,
             cli_path=self.cli_path,
             model=req.model or self.model,
+            effort=req.effort,  # type: ignore[arg-type]
             # None would pass an *empty* system prompt; we want real Claude Code.
             system_prompt={"type": "preset", "preset": "claude_code"},
             # include "local" so "Always allow" rules written to

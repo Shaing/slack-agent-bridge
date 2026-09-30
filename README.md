@@ -39,6 +39,7 @@ Put options **before** the prompt, in any order:
 ```
 mode:plan  design a caching layer for the API
 model:sonnet  summarize the last 10 commits
+effort:low  what's still open in the TODO?
 cwd:~/projects/foo  mode:acceptEdits  model:opus  fix the failing tests
 ```
 
@@ -69,7 +70,61 @@ only to that thread.
 | `!status` | In a thread: its settings and state. Top level: the 10 most recent threads (all users) |
 | `!new` | Forget this thread's session (keeps cwd/mode/model); next message starts fresh |
 | `!cwd /path` | Set cwd for a thread that hasn't started yet |
+| `!effort [level\|default]` | Show / set this thread's effort (`low` … `max`); from the next turn |
+| `!claude [text]` | In a thread the local model answered: hand it to Claude |
 | `!help` | Command list with the current defaults |
+
+## Model router: which Claude for a new thread (optional)
+
+With `CC_MODEL_ROUTER=on`, the first message of a new thread is classified by jev-local
+(`POST /v1/route/model`, Jev-style questions on the local model, ~0.6 s) into one of three tiers:
+
+| Tier | What | Runs on |
+|---|---|---|
+| simple | read-only lookups, status checks, listings, short explanations, chit-chat | `CC_SIMPLE_MODEL` / `CC_SIMPLE_EFFORT` (default `claude-sonnet-5-5` / `high`) |
+| standard | changes files, settings or services, troubleshooting, reviews, design | the default (`CC_MODEL`, CLI effort) |
+| heavy | `/sync`, `/closeout`, whole-project research, large design | the default, plus a hint to try `model:fable` |
+
+```
+you:  目前ollama-mcp 狀態如何?
+ └─ aLLEN:  ✅ Done · 2 turns · 11s · $0.03 · `claude-sonnet-5-5`/high (router: simple) · `!model default` for the usual model
+```
+
+* Follow-ups in a "simple" thread are classified again, with the start of the last reply as
+  context. When the work is no longer simple (or the router does not answer), the thread moves
+  back to the default model for good; it never moves down.
+* `model:` or `effort:` before the prompt skips the router; `!model` / `!effort` in a thread
+  take over from it.
+* `CC_MODEL_ROUTER=shadow` classifies but changes nothing, and logs the tier plus every turn's
+  model, effort, tool calls and cost to `CC_ROUTER_LOG`; `~/work/jev/scripts/router_report.py`
+  estimates what the simple tier would have saved.
+* Numbers behind the defaults (six real simple tasks, 2026-09-30): Opus/xhigh $2.38 and 61 s
+  median, Sonnet 5.5/high $0.68 and ~26 s, both adequate on 6/6 (details in `~/work/jev/README.md`).
+
+## Lane router: Claude or the local model (optional)
+
+With `CC_ROUTER=on`, the first message of a new thread is first classified by
+jev-local (a separate loopback service, `~/work/jev` on this host) — Jev-style typed questions answered from a local Ollama model's
+next-token probabilities, ~0.7 s. If every gate says the message is self-contained
+(chit-chat, general knowledge, translating or rewriting text in the message, short code),
+the local model answers it with no tools; everything else, and any router error or
+timeout, goes to Claude as usual.
+
+```
+you:  早安                                      ← router: local (p=0.92)
+ └─ aLLEN:  ✅ Done · 0s · local `qwen3.5:latest` · router p=0.92 · `!claude` to ask Claude instead
+ └─ aLLEN:  早安！今天有什麼我可以幫你的嗎？
+ └─ you:    !claude                              ← hand this thread to Claude, local exchange as context
+```
+
+* Only a thread's **first** message is routed. Replies in a Claude thread always go to
+  Claude; replies in a local thread stay local only while the router still says so, and
+  otherwise move the thread to Claude with the local exchange as context.
+* `lane:local` / `lane:claude` before a new thread's prompt forces the lane; any other
+  prefix (`model:`, `mode:`, `cwd:`) skips the router.
+* `CC_ROUTER=shadow` asks the router but lets Claude answer everything, and logs both the
+  decision and Claude's turn (tool calls, cost) to `CC_ROUTER_LOG` — the data for deciding
+  whether to turn it `on`. `~/work/jev/scripts/router_report.py` summarises that log.
 
 ## Permission modes
 

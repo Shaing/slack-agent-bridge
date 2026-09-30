@@ -160,6 +160,7 @@ class TurnOutput:
         self.segment_text: dict[int, str] = {}
         self.session_id: str | None = None
         self.result: TurnResult | None = None
+        self.done_note = ""  # appended to the final header, e.g. which lane answered
 
     # -- lifecycle ---------------------------------------------------------- #
     async def start(self) -> str | None:
@@ -268,6 +269,8 @@ class TurnOutput:
             meta.append(f"{result.duration_ms / 1000:.0f}s")
         if result.total_cost_usd is not None:
             meta.append(f"${result.total_cost_usd:.2f}")
+        if self.done_note:
+            meta.append(self.done_note)
         if meta:
             header += " · " + " · ".join(meta)
         self._set_header(header)

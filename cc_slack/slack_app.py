@@ -13,17 +13,18 @@ from slack_bolt.app.async_app import AsyncApp
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-from .config import ConfigError, Settings, resolve_cwd
+from . import lanes
+from .config import EFFORTS, ConfigError, Settings, resolve_cwd
 from .permissions import PromptRegistry, SlackPrompter, parse_action_value
 from .render import slack_text_to_plain
-from .runner import Decision, Runner, TurnHandle, TurnRequest
+from .runner import Decision, Runner, TurnHandle, TurnRequest, TurnResult
 from .store import SessionRegistry, ThreadSession
 from .stream import ChannelGate, TurnOutput
 
 log = logging.getLogger(__name__)
 
-# Leading `cwd:… mode:… model:…` options on the message that starts a thread, any order.
-PREFIX_RE = re.compile(r"^\s*(cwd|mode|model):[ \t]*(\S+)[ \t]*\n?", re.I)
+# Leading `cwd:… mode:… model:… lane:…` options on the message that starts a thread, any order.
+PREFIX_RE = re.compile(r"^\s*(cwd|mode|model|lane|effort):[ \t]*(\S+)[ \t]*\n?", re.I)
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]*$")
 IGNORED_SUBTYPES = re.compile(r".+")
 
@@ -40,6 +41,10 @@ Commands (in a thread or top-level):
 • `!new` — forget this thread's session (keeps cwd); next message starts fresh
 • `!mode [name]` — show / set the permission mode for this thread ({modes})
 • `!model [name|default]` — show / set the model for this thread (e.g. `sonnet`, `opus`, `haiku`, a full model id)
+• `!effort [low|medium|high|xhigh|max|default]` — show / set the effort for this thread (from the next turn)
+• `!claude [text]` — in a thread the local model answered: hand it to Claude (with the local exchange as context)
+Model router: `{model_router}` — simple lookups run on `{simple_model}`/{simple_effort}; `model:` or `effort:` before the prompt skips it.
+Lane router: `{router}` — `lane:local` / `lane:claude` before a new thread's prompt forces the lane.
 Mode and model changes apply immediately, even to a turn that is already running.
 While Claude waits for a free-text answer (*Other…*), `!commands` still work; any other message is the answer.
 Default cwd: `{default_cwd}` · default mode: `{default_mode}` · default model: `{default_model}`
@@ -87,6 +92,7 @@ class Bridge:
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._warned_users: set[str] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
+        self.router_log = lanes.RouterLog(settings.router_log)
 
     # -- lifecycle ---------------------------------------------------------- #
     async def startup(self) -> None:
@@ -180,16 +186,21 @@ class Bridge:
         if not text:
             return
 
+        opts: dict[str, str] = {}
         if session is None:
             opts, text = parse_prefixes(text)
             try:
                 cwd = resolve_cwd(opts["cwd"], self.settings.allowed_roots) if "cwd" in opts else self.settings.default_cwd
                 mode = self._check_mode(opts["mode"]) if "mode" in opts else self.settings.default_mode
                 model = self._check_model(opts["model"]) if "model" in opts else None
+                effort = self._check_effort(opts["effort"]) if "effort" in opts else None
+                if opts.get("lane", "claude").lower() not in ("local", "claude"):
+                    raise ConfigError(f"lane `{opts['lane']}` — use `lane:local` or `lane:claude`")
             except ConfigError as exc:
                 await self._say(channel, thread_ts, f":x: {exc}")
                 return
             session = self.sessions.create(channel, thread_ts, cwd, user, permission_mode=mode, model=model)
+            session.record.effort = effort
             if not text:
                 await self._say(
                     channel,
@@ -199,10 +210,194 @@ class Bridge:
                 )
                 return
 
-        await self.run_turn(session, text, user_ts=ts)
+        await self.dispatch(session, text, user_ts=ts, opts=opts)
+
+    # -- lanes -------------------------------------------------------------- #
+    async def dispatch(self, session: ThreadSession, text: str, *, user_ts: str, opts: dict[str, str] | None = None) -> None:
+        """Pick Claude or the local model for this message (Claude unless the router says otherwise)."""
+        record = session.record
+        opts = opts or {}
+        router = self.settings.router
+        if record.lane == "local":
+            # Follow-up in a local thread: it stays local only while the router still says so.
+            decision = None
+            if router != "off":
+                decision = await lanes.classify(
+                    self.settings.router_url, text, record.local_history, self.settings.router_timeout_s
+                )
+                self._log_route(record.thread_key, text, decision, router, followup=True)
+            if decision and decision.get("lane") == "local":
+                if await self.run_local_turn(session, text, user_ts=user_ts, decision=decision):
+                    return
+            await self.hand_off(session, text, user_ts=user_ts)
+            return
+
+        first = record.session_id is None and record.turns == 0
+        forced = opts.get("lane", "").lower()
+        if first and forced == "local":
+            if await self.run_local_turn(session, text, user_ts=user_ts, decision=None):
+                return
+        elif first and not opts and router == "on":
+            decision = await lanes.classify(self.settings.router_url, text, None, self.settings.router_timeout_s)
+            self._log_route(record.thread_key, text, decision, router)
+            if decision and decision.get("lane") == "local":
+                if await self.run_local_turn(session, text, user_ts=user_ts, decision=decision):
+                    return
+        elif first and not opts and router == "shadow":
+            self.spawn(self._shadow_route(record.thread_key, text))  # never delays the Claude turn
+        note = await self._route_model(session, text, first=first, opts=opts)
+        await self.run_turn(session, text, user_ts=user_ts, note=note)
+
+    async def _route_model(self, session: ThreadSession, text: str, *, first: bool, opts: dict[str, str]) -> str:
+        """Pick model/effort for this Claude turn. Returns a note for the Done header ("" = nothing to say).
+
+        A new thread's first message is classified; "simple" puts it on CC_SIMPLE_MODEL / CC_SIMPLE_EFFORT.
+        Follow-ups in such a thread are classified again with the last reply as context, and anything
+        that is no longer "simple" (or a router failure) moves the thread back to the default. Never down.
+        """
+        mode = self.settings.model_router
+        record = session.record
+        if mode == "off" or record.lane == "local":
+            return ""
+        s = self.settings
+        if first:
+            if {"model", "effort", "lane"} & set(opts):
+                return ""  # the user chose
+            if mode == "shadow":
+                self.spawn(self._shadow_model_route(session, text, None))
+                return ""
+            decision = await lanes.classify_model(s.router_url, text, None, s.router_timeout_s)
+            self._log_model_route(record.thread_key, text, decision, mode)
+            record.tier = (decision or {}).get("tier")
+            if record.tier == "simple":
+                record.model, record.effort, record.routed = s.simple_model, s.simple_effort, True
+                self.sessions.persist()
+                return f"`{s.simple_model}`/{s.simple_effort} (router: simple) · `!model default` for the usual model"
+            self.sessions.persist()
+            if record.tier == "heavy":
+                return "router: big task — `!model fable` if it needs more"
+            return ""
+        if record.tier != "simple":
+            return ""
+        history = [{"role": "assistant", "content": record.last_answer}] if record.last_answer else None
+        if mode == "shadow":
+            if not record.routed:
+                self.spawn(self._shadow_model_route(session, text, history))
+            return ""
+        if not record.routed:
+            return ""
+        decision = await lanes.classify_model(s.router_url, text, history, s.router_timeout_s)
+        self._log_model_route(record.thread_key, text, decision, mode, followup=True)
+        tier = (decision or {}).get("tier")
+        if tier == "simple":
+            return ""
+        record.model, record.effort, record.routed, record.tier = None, None, False, tier or "standard"
+        self.sessions.persist()
+        why = "router unavailable" if decision is None else f"router: {tier}"
+        return f"moved up to `{s.model or 'default'}` ({why})"
+
+    async def _shadow_model_route(self, session: ThreadSession, text: str, history: list[dict[str, str]] | None) -> None:
+        decision = await lanes.classify_model(self.settings.router_url, text, history, max(self.settings.router_timeout_s, 30))
+        self._log_model_route(session.record.thread_key, text, decision, "shadow", followup=history is not None)
+        tier = (decision or {}).get("tier")
+        if tier and (history is None or tier != "simple"):
+            session.record.tier = tier  # a shadow thread that grows past "simple" is not checked again
+            self.sessions.persist()
+
+    def _log_model_route(
+        self, thread_key: str, text: str, decision: dict[str, Any] | None, mode: str, followup: bool = False
+    ) -> None:
+        log.info("model route %s mode=%s tier=%s %s", thread_key, mode, (decision or {}).get("tier", "error"),
+                 (decision or {}).get("reasons"))
+        self.router_log.append(
+            {"kind": "model_route", "thread": thread_key, "mode": mode, "followup": followup, "text": text[:500],
+             **lanes.compact(decision, "tier")}
+        )
+
+    async def _shadow_route(self, thread_key: str, text: str) -> None:
+        decision = await lanes.classify(self.settings.router_url, text, None, max(self.settings.router_timeout_s, 30))
+        self._log_route(thread_key, text, decision, "shadow")
+
+    def _log_route(self, thread_key: str, text: str, decision: dict[str, Any] | None, mode: str, followup: bool = False) -> None:
+        log.info("route %s mode=%s lane=%s %s", thread_key, mode, (decision or {}).get("lane", "error"), (decision or {}).get("reasons"))
+        self.router_log.append(
+            {"kind": "route", "thread": thread_key, "mode": mode, "followup": followup, "text": text[:500], **lanes.compact(decision)}
+        )
+
+    async def run_local_turn(
+        self, session: ThreadSession, prompt: str, *, user_ts: str, decision: dict[str, Any] | None
+    ) -> bool:
+        """Answer with the local model. Returns False if it failed, so the caller can use Claude instead."""
+        record = session.record
+        model = self.settings.local_model
+        if session.running:
+            session.queued += 1
+            await self._say(record.channel, record.thread_ts, f":inbox_tray: Queued ({session.queued} ahead).")
+        async with session.lock:
+            session.queued = max(0, session.queued - 1)
+            out = TurnOutput(
+                self.client,
+                record.channel,
+                record.thread_ts,
+                cwd=record.cwd,
+                gate=self.gate,
+                edit_interval=self.settings.edit_interval_s,
+                max_chars=self.settings.msg_max_chars,
+                show_tools=False,
+                user_ts=user_ts,
+            )
+            out.header = f":llama: Local `{model}` answering…"
+            status_ts = await out.start()
+            record.in_flight = {"started_at": time.time(), "status_ts": status_ts, "user_ts": user_ts}
+            self.sessions.persist()
+            messages = [*record.local_history, {"role": "user", "content": prompt}]
+            log.info("local turn start %s model=%s prompt=%r", record.thread_key, model, prompt[:80])
+            text, t0, last_edit = "", time.monotonic(), 0.0
+            try:
+                async for piece in lanes.stream_local(self.settings.ollama_url, model, messages):
+                    text += piece
+                    if time.monotonic() - last_edit >= self.settings.edit_interval_s:
+                        last_edit = time.monotonic()
+                        await out.on_text(0, text)
+                if not text.strip():
+                    raise RuntimeError("empty reply")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("local turn failed %s: %s", record.thread_key, exc)
+                out.done_note = "handing over to Claude"
+                await out.on_result(TurnResult(None, "error", True, "", error=f"local model failed: {exc}"))
+                record.in_flight = None
+                self.sessions.persist()
+                self.router_log.append({"kind": "turn", "thread": record.thread_key, "lane": "local", "ok": False, "error": str(exc)[:200]})
+                return False
+            duration_ms = round((time.monotonic() - t0) * 1000)
+            await out.on_text(0, text)
+            p_local = ((decision or {}).get("answers") or {}).get("lane", {}).get("probabilities", {}).get("local")
+            why = f"router p={p_local:.2f}" if p_local is not None else "lane:local"
+            out.done_note = f"local `{model}` · {why} · `!claude` to ask Claude instead"
+            await out.on_result(TurnResult(None, "success", False, text, None, duration_ms, 0))
+            record.in_flight = None
+            record.lane = "local"
+            record.local_history = [*messages, {"role": "assistant", "content": text}][-lanes.MAX_HISTORY:]
+            self.router_log.append(
+                {"kind": "turn", "thread": record.thread_key, "lane": "local", "turn": record.turns, "ok": True,
+                 "duration_ms": duration_ms, "chars": len(text)}
+            )
+            record.turns += 1
+            record.last_used = time.time()
+            self.sessions.persist()
+            return True
+
+    async def hand_off(self, session: ThreadSession, text: str | None, *, user_ts: str) -> None:
+        """Move a local thread to Claude, with the local exchange as context in the first prompt."""
+        record = session.record
+        prompt = lanes.handoff_prompt(record.local_history, self.settings.local_model, text)
+        record.lane = None
+        record.local_history = []
+        self.sessions.persist()
+        await self.run_turn(session, prompt, user_ts=user_ts)
 
     # -- turns -------------------------------------------------------------- #
-    async def run_turn(self, session: ThreadSession, prompt: str, *, user_ts: str) -> None:
+    async def run_turn(self, session: ThreadSession, prompt: str, *, user_ts: str, note: str = "") -> None:
         record = session.record
         if session.running:
             session.queued += 1
@@ -220,6 +415,7 @@ class Bridge:
                 show_tools=self.settings.show_tools,
                 user_ts=user_ts,
             )
+            out.done_note = note
             if self.runner.semaphore.locked():
                 out.header = ":hourglass_flowing_sand: Waiting for a free slot…"
             status_ts = await out.start()
@@ -230,12 +426,13 @@ class Bridge:
             if record.permission_mode not in self.settings.allowed_modes:
                 record.permission_mode = self.settings.default_mode
             req = TurnRequest(
-                record.thread_key, prompt, record.cwd, record.session_id, record.permission_mode, record.model
+                record.thread_key, prompt, record.cwd, record.session_id, record.permission_mode, record.model,
+                record.effort,
             )
             log.info(
-                "turn start %s cwd=%s resume=%s mode=%s model=%s prompt=%r",
+                "turn start %s cwd=%s resume=%s mode=%s model=%s effort=%s prompt=%r",
                 record.thread_key, record.cwd, (record.session_id or "-")[:8], record.permission_mode,
-                record.model or "-", prompt[:80],
+                record.model or "-", record.effort or "-", prompt[:80],
             )
             try:
                 result = await self.runner.run_turn(req, out, self.prompter, session.handle)
@@ -252,6 +449,17 @@ class Bridge:
                 )
                 if result.session_id:
                     record.session_id = result.session_id
+                if result.result_text:
+                    record.last_answer = result.result_text[:800]
+            if self.settings.router != "off" or self.settings.model_router != "off":
+                self.router_log.append(
+                    {"kind": "turn", "thread": record.thread_key, "lane": "claude", "turn": record.turns,
+                     "model": record.model, "effort": record.effort, "tier": record.tier,
+                     "tools": len(out.tool_lines), "num_turns": result.num_turns if result else None,
+                     "cost": result.total_cost_usd if result else None,
+                     "duration_ms": result.duration_ms if result else None,
+                     "subtype": result.subtype if result else "exception"}
+                )
             record.turns += 1
             record.last_used = time.time()
             self.sessions.persist()
@@ -279,6 +487,10 @@ class Bridge:
                     modes=", ".join(f"`{m}`" for m in self.settings.allowed_modes),
                     default_mode=self.settings.default_mode,
                     default_model=self.settings.model or "CLI default",
+                    router=self.settings.router,
+                    model_router=self.settings.model_router,
+                    simple_model=self.settings.simple_model,
+                    simple_effort=self.settings.simple_effort,
                 ),
             )
         elif name == "status":
@@ -319,6 +531,16 @@ class Bridge:
                 await self._say(channel, thread_ts, f":new: Session forgotten — the next message starts fresh in `{session.record.cwd}`.")
         elif name in ("mode", "model"):
             await self._set_mode_or_model(name, arg, channel, thread_ts, reply_ts, session)
+        elif name == "effort":
+            await self._set_effort(arg, channel, thread_ts, reply_ts, session)
+        elif name == "claude":
+            if session is None or session.record.lane != "local":
+                await self._say(channel, reply_ts, "`!claude` works in a thread the local model answered; this one already goes to Claude.")
+            elif session.running:
+                await self._say(channel, thread_ts, "A turn is running — wait for it or `!stop` it first.")
+            else:
+                self.router_log.append({"kind": "override", "thread": session.record.thread_key, "to": "claude", "text": arg[:500]})
+                await self.hand_off(session, arg or None, user_ts=ts)
         else:
             await self._say(channel, reply_ts, f"Unknown command `!{name}` — try `!help`.")
 
@@ -328,6 +550,33 @@ class Bridge:
             allowed = ", ".join(f"`{m}`" for m in self.settings.allowed_modes)
             raise ConfigError(f"mode `{value}` is not allowed — choose one of {allowed} (see CC_ALLOWED_MODES)")
         return mode
+
+    @staticmethod
+    def _check_effort(value: str) -> str | None:
+        value = value.strip().lower()
+        if value in ("default", "reset", "none"):
+            return None
+        if value not in EFFORTS:
+            raise ConfigError(f"effort `{value}` — choose one of {', '.join(f'`{e}`' for e in EFFORTS)} or `default`")
+        return value
+
+    async def _set_effort(self, arg: str, channel: str, thread_ts: str, reply_ts: str | None, session: ThreadSession | None) -> None:
+        if session is None:
+            await self._say(channel, reply_ts, "`!effort` works inside a thread. To start one with it, send e.g. `effort:low your prompt`.")
+            return
+        record = session.record
+        if not arg:
+            await self._say(channel, thread_ts, f"Effort: `{record.effort or 'default'}` · set with `!effort {'|'.join(EFFORTS)}|default`")
+            return
+        try:
+            record.effort = self._check_effort(arg)
+        except ConfigError as exc:
+            await self._say(channel, thread_ts, f":x: {exc}")
+            return
+        record.routed = False
+        self.sessions.persist()
+        live = " — applies from the next turn" if session.running else ""
+        await self._say(channel, thread_ts, f"Effort for this thread: `{record.effort or 'default'}`{live}.")
 
     @staticmethod
     def _check_model(value: str) -> str | None:
@@ -372,6 +621,9 @@ class Bridge:
             else:
                 value = self._check_model(arg)
                 record.model = value
+                if record.routed:  # the router's effort went with its model choice
+                    record.effort = None
+                record.routed = False
         except ConfigError as exc:
             await self._say(channel, thread_ts, f":x: {exc}")
             return
@@ -414,6 +666,10 @@ class Bridge:
         return (
             f"*Thread status*\n• cwd: `{r.cwd}`\n• session: `{r.session_id or '(none yet)'}`\n"
             f"• mode: `{r.permission_mode}`\n• model: `{r.model or self.settings.model or 'default'}`\n"
+            + f"• effort: `{r.effort or 'default'}`\n"
+            + (f"• model router: `{r.tier}`{' (set model/effort)' if r.routed else ''}\n" if r.tier else "")
+            + (f"• lane: local `{self.settings.local_model}` (`!claude` hands it to Claude)\n" if r.lane == "local" else "")
+            + f"• router: `{self.settings.router}`\n"
             f"• state: {state}\n• turns: {r.turns}"
             + (f"\n• queued: {session.queued}" if session.queued else "")
             + f"\n• {slots}"

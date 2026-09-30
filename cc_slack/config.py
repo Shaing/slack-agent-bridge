@@ -62,6 +62,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
 SAFE_MODES = ("default", "plan", "acceptEdits")
 # `auto` lets a classifier approve actions; `bypassPermissions` approves everything.
 ALL_MODES = (*SAFE_MODES, "auto", "dontAsk", "bypassPermissions")
+ROUTER_MODES = ("off", "shadow", "on")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 class ConfigError(Exception):
@@ -91,6 +93,17 @@ class Settings:
     allowed_modes: tuple[str, ...] = SAFE_MODES
     log_level: str = "INFO"
     extra_env: dict[str, str] = field(default_factory=dict)
+    # Lane router (see cc_slack/lanes.py): off | shadow (log only) | on (local qwen may answer).
+    router: str = "off"
+    router_url: str = "http://127.0.0.1:8790"
+    router_timeout_s: float = 4.0
+    router_log: Path = Path("state/router.jsonl")
+    local_model: str = "qwen3.5:latest"
+    ollama_url: str = "http://127.0.0.1:11434"
+    # Model router (jev-local /v1/route/model): off | shadow | on. "simple" threads get these.
+    model_router: str = "off"
+    simple_model: str = "claude-sonnet-5-5"
+    simple_effort: str = "high"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -125,6 +138,17 @@ class Settings:
         if default_mode not in allowed_modes:
             raise ConfigError(f"CC_DEFAULT_MODE={default_mode!r} is not in CC_ALLOWED_MODES")
 
+        router = (_env("CC_ROUTER") or "off").lower()
+        if router not in ROUTER_MODES:
+            raise ConfigError(f"CC_ROUTER={router!r}; valid: {', '.join(ROUTER_MODES)}")
+
+        model_router = (_env("CC_MODEL_ROUTER") or "off").lower()
+        if model_router not in ROUTER_MODES:
+            raise ConfigError(f"CC_MODEL_ROUTER={model_router!r}; valid: {', '.join(ROUTER_MODES)}")
+        simple_effort = (_env("CC_SIMPLE_EFFORT") or "high").lower()
+        if simple_effort not in EFFORTS:
+            raise ConfigError(f"CC_SIMPLE_EFFORT={simple_effort!r}; valid: {', '.join(EFFORTS)}")
+
         cli_path = _env("CC_CLI_PATH")
         if cli_path is None:
             candidate = Path.home() / ".local/bin/claude"
@@ -153,6 +177,15 @@ class Settings:
             default_mode=default_mode,
             allowed_modes=allowed_modes,
             log_level=_env("CC_LOG_LEVEL") or "INFO",
+            router=router,
+            router_url=_env("CC_ROUTER_URL") or "http://127.0.0.1:8790",
+            router_timeout_s=float(_env("CC_ROUTER_TIMEOUT_S") or 4.0),
+            router_log=Path(_env("CC_ROUTER_LOG") or "state/router.jsonl"),
+            local_model=_env("CC_LOCAL_MODEL") or "qwen3.5:latest",
+            ollama_url=_env("CC_OLLAMA_URL") or "http://127.0.0.1:11434",
+            model_router=model_router,
+            simple_model=_env("CC_SIMPLE_MODEL") or "claude-sonnet-5-5",
+            simple_effort=simple_effort,
         )
 
 
